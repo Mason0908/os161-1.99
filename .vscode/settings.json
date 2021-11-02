@@ -1,5 +1,12 @@
 {
     "files.associations": {
-        "current.h": "c"
-    }
+        "current.h": "c",
+        "thread.h": "c",
+        "trapframe.h": "c",
+        "syscall.h": "c",
+        "fcntl.h": "c",
+        "synch.h": "c",
+        "opt-a2.h": "c"
+    },
+    "C_Cpp.errorSquiggles": "Enabled"
 }
