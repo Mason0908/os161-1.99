@@ -37,7 +37,8 @@
 #include <mips/tlb.h>
 #include <addrspace.h>
 #include <vm.h>
-#include <opt-A3.h>
+#include <mips/trapframe.h>
+#include "opt-A3.h"
 
 /*
  * Dumb MIPS-only "VM system" that is intended to only be just barely
@@ -52,20 +53,97 @@
  */
 static struct spinlock stealmem_lock = SPINLOCK_INITIALIZER;
 
+#if OPT_A3
+static int frame_num = 0;
+struct coremap_struct
+{
+	paddr_t addr;
+	int free_pages;
+};
+static struct coremap_struct *coremap;
+static bool coremap_loaded = false;
+#endif
+
 void vm_bootstrap(void)
 {
-	/* Do nothing. */
+#if OPT_A3
+	paddr_t coremap_end_addr, coremap_start_addr;
+	ram_getsize(&coremap_start_addr, &coremap_end_addr);
+	frame_num = (coremap_end_addr - coremap_start_addr) / PAGE_SIZE;
+	coremap = (struct coremap_struct *)PADDR_TO_KVADDR(coremap_start_addr);
+	coremap_start_addr += 2 * PAGE_SIZE;
+	for (int i = 0; i < frame_num; ++i)
+	{
+		coremap[i].addr = coremap_start_addr + i * PAGE_SIZE;
+		coremap[i].free_pages = -1;
+	}
+	coremap_loaded = true;
+#endif
 }
 
 static paddr_t
 getppages(unsigned long npages)
 {
 	paddr_t addr;
-
 	spinlock_acquire(&stealmem_lock);
+#if OPT_A3
+	bool isFound = false;
+	int start_frame;
+	if (coremap_loaded)
+	{
+		int frame = 0;
+		while (frame < frame_num)
+		{
+			if (isFound)
+			{
+				break;
+			}
 
+			if (coremap[frame].free_pages == -1)
+			{
+				if ((int)npages <= 1)
+				{
+					start_frame = frame;
+					isFound = true;
+				}
+				else
+				{
+					int curr_start_frame = frame;
+					int curr_count_frame = 1;
+					while (curr_start_frame + curr_count_frame < frame_num){			
+						int curr_frame = curr_start_frame + curr_count_frame;
+						if (curr_count_frame + 1 == (int)npages)
+						{
+							start_frame = frame;
+							isFound = true;
+							break;
+						}
+						if (coremap[curr_frame].free_pages > -1)
+						{
+							frame = curr_frame + coremap[curr_frame].free_pages - 1;
+							break;
+						}
+						curr_count_frame++;
+					}
+				}
+			}
+			frame++;
+		}
+		KASSERT(isFound == true);
+		addr = coremap[start_frame].addr;
+		int count;
+		for (count = 0; count < (int)npages; count++)
+		{
+			coremap[start_frame + count].free_pages = (int)npages - count;
+		}
+	}
+	else
+	{
+		addr = ram_stealmem(npages);
+	}
+#else
 	addr = ram_stealmem(npages);
-
+#endif
 	spinlock_release(&stealmem_lock);
 	return addr;
 }
@@ -85,9 +163,33 @@ alloc_kpages(int npages)
 
 void free_kpages(vaddr_t addr)
 {
-	/* nothing - leak the memory. */
 
+#if OPT_A3
+	spinlock_acquire(&stealmem_lock);
+	if (coremap_loaded)
+	{
+		int free_start = 0;
+		while (coremap[free_start].addr != addr && free_start < frame_num)
+		{
+			free_start++;
+		}
+		int pages_to_free = coremap[free_start].free_pages;
+		if (pages_to_free == -1)
+		{
+			spinlock_release(&stealmem_lock);
+			return;
+		}
+		int free_count;
+		for (free_count = 0; free_count < pages_to_free; free_count++)
+		{
+			coremap[free_count + free_start].free_pages = -1;
+		}
+	}
+	spinlock_release(&stealmem_lock);
+#else
+	/* nothing - leak the memory. */
 	(void)addr;
+#endif
 }
 
 void vm_tlbshootdown_all(void)
@@ -258,6 +360,11 @@ as_create(void)
 
 void as_destroy(struct addrspace *as)
 {
+#if OPT_A3
+	free_kpages(as->as_pbase1);
+	free_kpages(as->as_pbase2);
+	free_kpages(as->as_stackpbase);
+#endif
 	kfree(as);
 }
 
